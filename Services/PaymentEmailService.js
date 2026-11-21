@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { createPaymentInvoicePdf } from './PaymentInvoiceService.js';
 
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
     '&': '&amp;',
@@ -13,7 +14,7 @@ const createPaymentEmailHtml = ({ candidateName, amount, currency, orderId, paym
     const statusColor = isPaid ? '#15803d' : '#b91c1c';
     const title = isPaid ? 'Payment successful' : 'Payment unsuccessful';
     const message = isPaid
-        ? 'Your payment for the candidate verification request was received successfully.'
+        ? 'Your payment for the candidate verification request was received successfully. Please find your invoice attached as a PDF.'
         : 'We could not complete your payment for the candidate verification request. You can try again from the candidate verification form.';
 
     return `<!doctype html>
@@ -55,7 +56,7 @@ export const sendPaymentStatusEmail = async (transaction, status, failureReason 
     });
     const isPaid = status === 'Paid';
 
-    await mailTransport.sendMail({
+    const mail = {
         from: `"Worktrail Payments" <${SMTP_USER_NAME}>`,
         to: transaction.Email,
         subject: isPaid ? 'Candidate verification payment successful' : 'Candidate verification payment failed',
@@ -68,5 +69,16 @@ export const sendPaymentStatusEmail = async (transaction, status, failureReason 
             status,
             failureReason
         })
-    });
+    };
+
+    if (isPaid) {
+        const fileOrderId = String(transaction.RazorpayOrderID || 'payment').replace(/[^A-Za-z0-9_-]/g, '_');
+        mail.attachments = [{
+            filename: `Worktrail-Invoice-${fileOrderId}.pdf`,
+            content: createPaymentInvoicePdf(transaction),
+            contentType: 'application/pdf'
+        }];
+    }
+
+    await mailTransport.sendMail(mail);
 };

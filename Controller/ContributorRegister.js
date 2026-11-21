@@ -21,18 +21,27 @@ export const ContributorRegister = async (req, res) => {
         UserMasterID
     } = req.body;
 
+    const normalizedEmail = typeof EmailID === 'string' ? EmailID.trim() : '';
+
     // Basic validation
-    if (!username || !password || !UserType || !EmailID) {
+    if (!username || !password || !UserType || !normalizedEmail) {
         return res.status(400).json({ message: 'Username, password, UserType, and EmailID are required.' });
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+        return res.status(400).json({ message: 'Enter a valid email address.' });
+    }
 
+    let transaction;
+    let transactionCommitted = false;
     try {
         await poolConnect;
-        const request = pool.request();
+        transaction = new sql.Transaction(pool);
+        await transaction.begin(sql.ISOLATION_LEVEL.SERIALIZABLE);
+        const request = new sql.Request(transaction);
         request.input('username', sql.VarChar, username);
         request.input('password', sql.VarChar, password);
         request.input('Usertype', sql.VarChar, UserType);
-        request.input('EmailID', sql.VarChar, EmailID || null);
+        request.input('EmailID', sql.VarChar, normalizedEmail);
         request.input('FirstName', sql.VarChar, FirstName || null);
         request.input('LastName', sql.VarChar, LastName || null);
         request.input('CompanyName', sql.VarChar, CompanyName || null);
@@ -45,6 +54,17 @@ export const ContributorRegister = async (req, res) => {
         request.input('ZIPcode', sql.VarChar, ZIPcode || null);
         request.input('OrgMasterID', sql.Int, typeof OrgMasterID !== 'undefined' ? OrgMasterID : null);
         request.input('UserMasterID', sql.Int, typeof UserMasterID !== 'undefined' ? UserMasterID : null);
+
+        const existingUser = await request.query(`
+            SELECT TOP 1 id
+            FROM Worktrialusers WITH (UPDLOCK, HOLDLOCK)
+            WHERE LOWER(LTRIM(RTRIM(EmailID))) = LOWER(@EmailID)
+        `);
+        if (existingUser.recordset.length) {
+            await transaction.rollback();
+            return res.status(409).json({ message: 'This email is already used. Enter a different email.' });
+        }
+
         const otp = createOtp();
         request.input('otp', sql.VarChar, otp);
 
@@ -60,10 +80,17 @@ export const ContributorRegister = async (req, res) => {
         `;
 
         await request.query(insertQuery);
+        await transaction.commit();
+        transactionCommitted = true;
 
-        await sendOtp(EmailID, otp, 'registration', FirstName, LastName);
+        await sendOtp(normalizedEmail, otp, 'registration', FirstName, LastName);
         return res.status(201).json({ message: 'A registration OTP was sent to your email.', otpRequired: true });
     } catch (error) {
+        if (transaction && !transactionCommitted) {
+            try { await transaction.rollback(); } catch (rollbackError) {
+                console.error('Contributor registration rollback failed:', rollbackError);
+            }
+        }
         console.error('Database error during registration:', error);
         // Respond with the actual error message for transparency
         return res.status(500).json({ 

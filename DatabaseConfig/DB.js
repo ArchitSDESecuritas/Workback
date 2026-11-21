@@ -1,4 +1,7 @@
 import mssql from 'mssql';
+import dotenv from 'dotenv';
+dotenv.config();
+
 
 // Database configuration
 // const dbConfig = {
@@ -13,10 +16,10 @@ import mssql from 'mssql';
 // };
 
 const dbConfig = {
-    user: 'BGVArchit',
-    password: 'ArchitSDE@#1234',
-    server: '10.83.0.47',
-    database: 'WorkTrailTest',
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    server: process.env.DB_SERVER,
+    database: process.env.DB_NAME,
     options: {
         encrypt: false, // Set to true if you are using Azure
         trustServerCertificate: true // change to false for production

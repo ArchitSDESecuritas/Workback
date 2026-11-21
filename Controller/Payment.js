@@ -2,17 +2,21 @@ import crypto from 'crypto';
 import Razorpay from 'razorpay';
 import { sql, pool, poolConnect } from '../DatabaseConfig/DB.js';
 import { sendPaymentStatusEmail } from '../Services/PaymentEmailService.js';
+import { createPaymentInvoicePdf } from '../Services/PaymentInvoiceService.js';
 
 const getRequiredText = (value) => typeof value === 'string' && value.trim().length > 0;
 const isValidEmail = (value) => typeof value === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
 
+const safeLogValue = (value, maxLength = 500) => String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .slice(0, maxLength);
+
 const logErrorDetails = (label, error) => {
+    const status = Number(error?.statusCode || error?.response?.status);
     console.error(label, {
-        message: error?.message,
-        code: error?.code,
-        status: error?.statusCode || error?.response?.status,
-        response: error?.response?.data,
-        stack: error?.stack
+        message: safeLogValue(error?.message),
+        code: safeLogValue(error?.code, 100),
+        status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : undefined
     });
 };
 
@@ -67,7 +71,12 @@ export const createPaymentOrder = async (req, res) => {
             return res.status(400).json({ message: 'Selected organization pricing was not found.' });
         }
         const masterAmount = Number(organizationResult.recordset[0].Amount);
-        const expectedAmount = Number((masterAmount * numericCandidateCount * 1.18).toFixed(2));
+        const userRole = String(req.user?.Usertype || '').toLowerCase().trim().replace(/[\s_-]+/g, '');
+        const unitBaseAmount = Number(masterAmount.toFixed(2));
+        const unitGstAmount = userRole === 'client'
+            ? Number((unitBaseAmount * 0.18).toFixed(2))
+            : 0;
+        const expectedAmount = Number(((unitBaseAmount + unitGstAmount) * numericCandidateCount).toFixed(2));
         if (!Number.isFinite(numericAmount) || Math.abs(numericAmount - expectedAmount) > 0.01) {
             return res.status(400).json({ message: 'Payment amount does not match the selected organization pricing.' });
         }
@@ -85,9 +94,9 @@ export const createPaymentOrder = async (req, res) => {
 
         await request.query(`
             INSERT INTO PaymentTransactions
-                (CandidateName, Email, Phone, OrganizationID, Amount, Currency, RazorpayOrderID, Status)
+                (CandidateName, Email, Phone, OrganizationID, Amount, Currency, RazorpayOrderID, Status, InvoiceStatus)
             VALUES
-                (@CandidateName, @Email, @Phone, @OrganizationID, @Amount, @Currency, @RazorpayOrderID, 'Created')
+                (@CandidateName, @Email, @Phone, @OrganizationID, @Amount, @Currency, @RazorpayOrderID, 'Created', 'Pending')
         `);
 
         const responsePayload = {
@@ -97,7 +106,6 @@ export const createPaymentOrder = async (req, res) => {
             currency: order.currency,
             candidateName: candidateName.trim()
         };
-        console.log('[Payment/CreateOrder] Response JSON:', responsePayload);
         return res.status(201).json(responsePayload);
     } catch (error) {
         logErrorDetails('[Payment/CreateOrder] Error:', error);
@@ -108,9 +116,10 @@ export const createPaymentOrder = async (req, res) => {
 export const verifyPayment = async (req, res) => {
     const { razorpay_order_id: orderId, razorpay_payment_id: paymentId, razorpay_signature: signature } = req.body;
 
-    console.log('[Payment/Verify] Request JSON:', {
-        ...req.body,
-        razorpay_signature: signature ? '[REDACTED]' : signature
+    console.log('[Payment/Verify] Request received:', {
+        hasOrderId: Boolean(orderId),
+        hasPaymentId: Boolean(paymentId),
+        hasSignature: Boolean(signature)
     });
 
     if (!orderId || !paymentId || !signature) {
@@ -128,11 +137,7 @@ export const verifyPayment = async (req, res) => {
     const receivedSignatureBuffer = Buffer.from(signature);
     const isValid = expectedSignatureBuffer.length === receivedSignatureBuffer.length &&
         crypto.timingSafeEqual(expectedSignatureBuffer, receivedSignatureBuffer);
-    console.log('[Payment/Verify] Signature validation:', {
-        orderId,
-        paymentId,
-        isValid
-    });
+    console.log('[Payment/Verify] Signature validation completed:', { isValid });
 
     if (!isValid) {
         return res.status(400).json({ message: 'Payment verification failed.' });
@@ -150,18 +155,19 @@ export const verifyPayment = async (req, res) => {
             SET RazorpayPaymentID = @RazorpayPaymentID,
                 RazorpaySignature = @RazorpaySignature,
                 Status = 'Paid',
+                InvoiceStatus = CASE WHEN InvoiceStatus = 'Downloaded' THEN 'Downloaded' ELSE 'Generated' END,
                 FailureReason = NULL,
                 PaidAt = GETDATE(),
                 UpdatedAt = GETDATE()
             OUTPUT INSERTED.TransactionID, INSERTED.RazorpayOrderID, INSERTED.Status,
                    INSERTED.CandidateName, INSERTED.Email, INSERTED.Amount, INSERTED.Currency,
-                   INSERTED.RazorpayPaymentID, DELETED.Status AS PreviousStatus
+                   INSERTED.RazorpayPaymentID, INSERTED.InvoiceStatus, INSERTED.PaidAt,
+                   DELETED.Status AS PreviousStatus
             WHERE RazorpayOrderID = @RazorpayOrderID
         `);
 
         if (result.recordset.length === 0) {
             const responsePayload = { message: 'Payment order was not found.' };
-            console.log('[Payment/Verify] Response JSON:', responsePayload);
             return res.status(404).json(responsePayload);
         }
         const transaction = result.recordset[0];
@@ -180,10 +186,7 @@ export const verifyPayment = async (req, res) => {
             transaction: publicTransaction,
             emailSent
         };
-        console.log('[Payment/Verify] Payment verification completed:', {
-            transactionId: publicTransaction.TransactionID,
-            emailSent
-        });
+        console.log('[Payment/Verify] Payment verification completed:', { emailSent });
         return res.status(200).json(responsePayload);
     } catch (error) {
         logErrorDetails('[Payment/Verify] Error:', error);
@@ -268,7 +271,6 @@ export const reportPaymentFailure = async (req, res) => {
 };
 
 export const getPaymentTransaction = async (req, res) => {
-    console.log('[Payment/Transaction] Request JSON:', { orderId: req.params.orderId });
     try {
         await poolConnect;
         const request = pool.request();
@@ -282,14 +284,141 @@ export const getPaymentTransaction = async (req, res) => {
         `);
         if (result.recordset.length === 0) {
             const responsePayload = { message: 'Payment transaction was not found.' };
-            console.log('[Payment/Transaction] Response JSON:', responsePayload);
             return res.status(404).json(responsePayload);
         }
         const responsePayload = { data: result.recordset[0] };
-        console.log('[Payment/Transaction] Response JSON:', responsePayload);
         return res.status(200).json(responsePayload);
     } catch (error) {
         logErrorDetails('[Payment/Transaction] Error:', error);
         return res.status(500).json({ message: 'Unable to retrieve payment transaction.' });
+    }
+};
+
+export const getClientPaymentInvoices = async (req, res) => {
+    const email = String(req.user?.EmailID || req.user?.email || '').trim();
+    if (!isValidEmail(email)) {
+        return res.status(401).json({ message: 'A valid client email is required.' });
+    }
+
+    try {
+        await poolConnect;
+        const request = pool.request();
+        request.input('Email', sql.VarChar(255), email);
+        const result = await request.query(`
+            SELECT p.TransactionID, p.CandidateName, p.Email, p.Amount, p.Currency,
+                   p.RazorpayOrderID, p.RazorpayPaymentID, p.InvoiceStatus, p.PaidAt, p.CreatedAt,
+                   (SELECT COUNT(*) FROM WorktrailclientData w WHERE w.OrderID = p.RazorpayOrderID) AS Quantity
+            FROM PaymentTransactions p
+            WHERE LOWER(LTRIM(RTRIM(p.Email))) = LOWER(@Email)
+              AND p.Status = 'Paid'
+              AND p.InvoiceStatus IN ('Generated', 'Downloaded')
+              AND EXISTS (
+                  SELECT 1
+                  FROM WorktrailclientData w
+                  WHERE w.OrderID = p.RazorpayOrderID
+              )
+            ORDER BY COALESCE(p.PaidAt, p.CreatedAt) DESC
+        `);
+        return res.status(200).json({ data: result.recordset });
+    } catch (error) {
+        logErrorDetails('[Payment/Invoices] Error:', error);
+        return res.status(500).json({ message: 'Unable to retrieve payment invoices.' });
+    }
+};
+
+export const downloadClientPaymentInvoice = async (req, res) => {
+    const email = String(req.user?.EmailID || req.user?.email || '').trim();
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const orderId = typeof body.orderId === 'string' ? body.orderId.trim() : '';
+    const razorpayOrderId = typeof body.razorpayOrderId === 'string' ? body.razorpayOrderId.trim() : '';
+    const quantity = Number(body.quantity);
+
+    if (!isValidEmail(email)) {
+        return res.status(401).json({ message: 'A valid client email is required.' });
+    }
+    if (!getRequiredText(orderId) || !getRequiredText(razorpayOrderId)) {
+        return res.status(400).json({ message: 'Order ID and Razorpay order ID are required.' });
+    }
+    if (!Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ message: 'A positive employee quantity is required.' });
+    }
+
+    try {
+        await poolConnect;
+        const lookup = pool.request();
+        lookup.input('Email', sql.VarChar(255), email);
+        lookup.input('OrderID', sql.VarChar(500), orderId);
+        lookup.input('RazorpayOrderID', sql.VarChar(80), razorpayOrderId);
+        const invoiceResult = await lookup.query(`
+            SELECT TOP 1 TransactionID, CandidateName, Email, Amount, Currency,
+                   RazorpayOrderID, RazorpayPaymentID, PaidAt, CreatedAt
+            FROM PaymentTransactions
+            WHERE LOWER(LTRIM(RTRIM(Email))) = LOWER(@Email)
+              AND Status = 'Paid'
+              AND InvoiceStatus = 'Generated'
+              AND RazorpayOrderID = @RazorpayOrderID
+              AND RazorpayOrderID = @OrderID
+              AND EXISTS (
+                  SELECT 1
+                  FROM WorktrailclientData
+                  WHERE OrderID = @OrderID
+              )
+        `);
+        if (!invoiceResult.recordset.length) {
+            return res.status(404).json({ message: 'A downloadable invoice was not found for this order.' });
+        }
+
+        const invoice = invoiceResult.recordset[0];
+        const employeeRequest = pool.request();
+        employeeRequest.input('OrderID', sql.VarChar(500), orderId);
+        const employeeResult = await employeeRequest.query(`
+            SELECT FirstName, MiddleName, LastName, EmployeeCode
+            FROM WorktrailclientData
+            WHERE OrderID = @OrderID
+            ORDER BY Sno
+        `);
+        if (!employeeResult.recordset.length) {
+            return res.status(404).json({ message: 'No employee records were found for this order.' });
+        }
+        if (employeeResult.recordset.length !== quantity) {
+            return res.status(409).json({
+                message: 'The employee quantity does not match the records saved for this order. Refresh the invoice list and try again.'
+            });
+        }
+        invoice.Quantity = employeeResult.recordset.length;
+        invoice.Employees = employeeResult.recordset;
+        const pdf = createPaymentInvoicePdf(invoice);
+        const update = pool.request();
+        update.input('Email', sql.VarChar(255), email);
+        update.input('OrderID', sql.VarChar(500), orderId);
+        update.input('RazorpayOrderID', sql.VarChar(80), razorpayOrderId);
+        const updated = await update.query(`
+            UPDATE PaymentTransactions
+            SET InvoiceStatus = 'Downloaded',
+                UpdatedAt = GETDATE()
+            OUTPUT INSERTED.TransactionID
+            WHERE LOWER(LTRIM(RTRIM(Email))) = LOWER(@Email)
+              AND Status = 'Paid'
+              AND InvoiceStatus = 'Generated'
+              AND RazorpayOrderID = @RazorpayOrderID
+              AND RazorpayOrderID = @OrderID
+              AND EXISTS (
+                  SELECT 1
+                  FROM WorktrailclientData
+                  WHERE OrderID = @OrderID
+              )
+        `);
+        if (!updated.recordset.length) {
+            return res.status(409).json({ message: 'This invoice has already been downloaded.' });
+        }
+
+        const fileOrderId = razorpayOrderId.replace(/[^A-Za-z0-9_-]/g, '_');
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="Worktrail-Invoice-${fileOrderId}.pdf"`);
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(200).send(pdf);
+    } catch (error) {
+        logErrorDetails('[Payment/InvoiceDownload] Error:', error);
+        return res.status(500).json({ message: 'Unable to download the payment invoice.' });
     }
 };

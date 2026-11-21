@@ -19,7 +19,14 @@ import { OrgmasterSearch } from './Controller/OrgmasterSearch.js';
 import { ContributorAdminData } from './Controller/ContributorAdminData.js';
 import { ContributorUpdate } from './Controller/ContributorUpdate.js';
 import { ContributorDelete } from './Controller/ContributorDelete.js';
-import { createPaymentOrder, verifyPayment, reportPaymentFailure, getPaymentTransaction } from './Controller/Payment.js';
+import {
+    createPaymentOrder,
+    verifyPayment,
+    reportPaymentFailure,
+    getPaymentTransaction,
+    getClientPaymentInvoices,
+    downloadClientPaymentInvoice
+} from './Controller/Payment.js';
 import { ClientDynamicfield } from './Controller/ClientDynamicfield.js';
 import { ClientEmpData } from './Controller/ClientEmpData.js';
 import { ReviewClientData } from './Controller/ReviewClientData.js';
@@ -35,6 +42,7 @@ import { ContributorServiceRequest } from './Controller/ContributorServiceReques
 import { ContributorDash } from './Controller/ContributorDash.js';
 import { ContactUS } from './Controller/ContactUS.js';
 import { PaymentAdminData } from './Controller/PaymentAdminData.js';
+import { ManagementPaymentDashboard } from './Controller/ManagementPaymentDashboard.js';
 import { AdminDash } from './Controller/AdminDash.js';
 import { AdminRequestProgress } from './Controller/AdminRequestProgress.js';
 import { FacilitatorsData } from './Controller/Facilitatormasdata.js';
@@ -51,6 +59,8 @@ import { MasterManage } from './Controller/MasterUserData.js';
 import { MasterUserUpdate } from './Controller/MasterUserUpdate.js';
 import { PDFBase64 } from './Controller/PDFBase64.js';
 import { ClientDownloadMail } from './Controller/ClientDownloadMail.js';
+import { ClientDocumentsMail } from './Controller/ClientDocumentsMail.js';
+import { ClientEmployeeCodeMail } from './Controller/ClientEmployeeCodeMail.js';
 // Auth and Session Middleware
 import { authenticateSession, authorizeRoles } from './Middleware/AuthMiddleware.js';
 
@@ -137,6 +147,7 @@ app.get('/api/AdminDash', authenticateSession, authorizeRoles('Admin', 'Superadm
 app.get('/api/AdminClientData', authenticateSession, authorizeRoles('Admin', 'Superadmin','Client', 'Fascilator','ContributorAdmin', 'ContributorUser', 'Contributor'), AdminClientData);
 app.post('/api/AdminRequestProgress', authenticateSession, authorizeRoles('Admin', 'Superadmin','Client', 'Fascilator','ContributorAdmin', 'ContributorUser', 'Contributor'), AdminRequestProgress);
 app.post('/api/PaymentAdminData', authenticateSession, authorizeRoles('Admin', 'Superadmin','Client', 'Fascilator','ContributorAdmin', 'ContributorUser', 'Contributor'), PaymentAdminData);
+app.post('/api/Management/PaymentDashboard', authenticateSession, authorizeRoles('Management'), ManagementPaymentDashboard);
 app.post('/api/UpdateFinalReport', authenticateSession, authorizeRoles('Admin', 'Superadmin','Client', 'Fascilator','ContributorAdmin', 'ContributorUser', 'Contributor'), UpdateFinalReport);
 app.post('/api/FacilitatorCommentsUpdate', authenticateSession, authorizeRoles('Admin', 'Superadmin','Client', 'Fascilator','ContributorAdmin', 'ContributorUser', 'Contributor'), FacilitatorCommentsUpdate);
 app.post('/api/OrgsByFacilitator', authenticateSession, authorizeRoles('Admin', 'Superadmin','Client', 'Fascilator','ContributorAdmin', 'ContributorUser', 'Contributor'), OrgsByFacilitator);
@@ -154,6 +165,8 @@ app.post('/api/ReviewClientData', authenticateSession, authorizeRoles('Client', 
 app.post('/api/ClientDocumentUpdate', authenticateSession, authorizeRoles('Client', 'Fascilator', 'Admin', 'Superadmin','ContributorAdmin', 'ContributorUser', 'Contributor'), updateClientDocuments);
 app.post('/api/ClientEmpStatus', authenticateSession, authorizeRoles('Client', 'Fascilator', 'Admin', 'Superadmin','ContributorAdmin', 'ContributorUser', 'Contributor'), ClientEmpStatus);
 app.post('/api/ClientDownloadMail', authenticateSession, authorizeRoles('Client','Fascilator', 'Admin', 'Superadmin'), ClientDownloadMail);
+app.post('/api/ClientDocumentsMail',ClientDocumentsMail);
+app.post('/api/ClientEmployeeCodeMail', ClientEmployeeCodeMail);
 
 // OrgMaster Management (Superadmin only)
 app.post('/api/Orgmastermanage', authenticateSession, authorizeRoles('Superadmin','ContributorAdmin', 'ContributorUser', 'Contributor','Client','Fascilator'), Orgmastermanage);
@@ -186,10 +199,12 @@ app.post('/api/ContributorDash', authenticateSession, authorizeRoles('Contributo
 app.post('/api/DownloadUpdatePDF', authenticateSession, authorizeRoles('ContributorAdmin', 'ContributorUser', 'Contributor', 'Admin', 'Superadmin','Client','Fascilator'),DownloadUpdatePDF);
 
 // Payment Gateways
-app.post('/api/Payment/CreateOrder', authenticateSession, authorizeRoles('Client', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), createPaymentOrder);
-app.post('/api/Payment/Verify', authenticateSession, authorizeRoles('Client', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), verifyPayment);
-app.post('/api/Payment/Failure', authenticateSession, authorizeRoles('Client', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), reportPaymentFailure);
-app.get('/api/Payment/Transaction/:orderId', authenticateSession, authorizeRoles('Client', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), getPaymentTransaction);
+app.post('/api/Payment/CreateOrder', authenticateSession, authorizeRoles('Client', 'InternalClient', 'InternetClient', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), createPaymentOrder);
+app.post('/api/Payment/Verify', authenticateSession, authorizeRoles('Client', 'InternalClient', 'InternetClient', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), verifyPayment);
+app.post('/api/Payment/Failure', authenticateSession, authorizeRoles('Client', 'InternalClient', 'InternetClient', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), reportPaymentFailure);
+app.get('/api/Payment/Transaction/:orderId', authenticateSession, authorizeRoles('Client', 'InternalClient', 'InternetClient', 'Admin', 'Superadmin','ContributorAdmin','ContributorUser','Contributor','Fascilator'), getPaymentTransaction);
+app.get('/api/Payment/Invoices', authenticateSession, authorizeRoles('Client', 'InternalClient', 'InternetClient'), getClientPaymentInvoices);
+app.post('/api/Payment/Invoice/Download', authenticateSession, authorizeRoles('Client', 'InternalClient', 'InternetClient'), downloadClientPaymentInvoice);
 app.post('/api/CreateFacilitator',authenticateSession, authorizeRoles('Superadmin','ContributorAdmin', 'ContributorUser', 'Contributor','Client','Fascilator'),CreateFacilitator)
 
 app.listen(PORT, () => {

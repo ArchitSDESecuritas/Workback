@@ -10,6 +10,7 @@ CREATE TABLE PaymentTransactions (
     RazorpayPaymentID VARCHAR(80) NULL,
     RazorpaySignature VARCHAR(255) NULL,
     Status VARCHAR(30) NOT NULL CONSTRAINT DF_PaymentTransactions_Status DEFAULT 'Created',
+    InvoiceStatus VARCHAR(30) NOT NULL CONSTRAINT DF_PaymentTransactions_InvoiceStatus DEFAULT 'Pending',
     FailureReason NVARCHAR(500) NULL,
     CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_PaymentTransactions_CreatedAt DEFAULT SYSUTCDATETIME(),
     PaidAt DATETIME2 NULL,

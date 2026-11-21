@@ -1,11 +1,7 @@
 import nodemailer from 'nodemailer'
 import crypto from 'crypto'
-import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
- 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
  
 const otpTransport = nodemailer.createTransport({
     host: process.env.SMTP_SERVER,
@@ -384,7 +380,7 @@ export const sendOtp = async (email, otp, purpose, firstName = '', lastName = ''
  
     const attachments = assetNames
         .map(name => {
-            const filePath = path.join(__dirname, name);
+            const filePath = fileURLToPath(new URL(`./${name}`, import.meta.url));
             return fs.existsSync(filePath) ? { filename: name, path: filePath, cid: name } : null;
         })
         .filter(Boolean);

@@ -8,9 +8,13 @@ const documentFolders = {
     LOA: path.join(backendRoot, 'LOA'),
     SupportingDocs: path.join(backendRoot, 'SupportingDocs')
 };
+const allowedFolders = new Set(Object.keys(documentFolders));
 
 const getDocumentBase64 = async (storedPath, folderName) => {
     if (!storedPath) return null;
+    if (!allowedFolders.has(folderName)) {
+        throw new Error('Invalid candidate document folder.');
+    }
 
     const normalizedPath = String(storedPath).replace(/\\/g, '/');
     const expectedPrefix = `${folderName}/`;

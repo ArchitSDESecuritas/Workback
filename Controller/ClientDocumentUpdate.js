@@ -10,17 +10,58 @@ const folders = {
     SupportingDocs: path.join(backendRoot, 'SupportingDocs')
 };
 const types = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png' };
+const allowedFolders = new Set(Object.keys(folders));
+const generatedFileNamePattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.(pdf|jpg|png)$/i;
+
+const resolveGeneratedDocumentPath = (folder, fileName) => {
+    if (!allowedFolders.has(folder) || !generatedFileNamePattern.test(fileName)) {
+        throw new Error('Invalid generated document path.');
+    }
+
+    const folderPath = folders[folder];
+    const resolvedPath = path.resolve(folderPath, fileName);
+    const relativePath = path.relative(folderPath, resolvedPath);
+    if (!relativePath || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+        throw new Error('Generated document path is outside the document folder.');
+    }
+
+    return resolvedPath;
+};
 
 const saveDocument = async (value, folder) => {
     if (!value) return null;
+    if (!allowedFolders.has(folder)) throw new Error('Invalid document folder.');
     const match = /^data:(application\/pdf|image\/jpeg|image\/png);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(value);
     if (!match) throw new Error(`${folder} must be a PDF, JPG, or PNG base64 document.`);
-    const buffer = Buffer.from(match[2].replace(/\s/g, ''), 'base64');
+    const encodedDocument = match[2].replace(/\s/g, '');
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encodedDocument)) {
+        throw new Error(`${folder} must contain valid base64 data.`);
+    }
+    const buffer = Buffer.from(encodedDocument, 'base64');
+    if (buffer.toString('base64') !== encodedDocument) {
+        throw new Error(`${folder} must contain valid base64 data.`);
+    }
     if (!buffer.length || buffer.length > 5 * 1024 * 1024) throw new Error(`${folder} must be 5 MB or smaller.`);
     await fs.mkdir(folders[folder], { recursive: true });
-    const fileName = `${Date.now()}-${crypto.randomUUID()}.${types[match[1]]}`;
-    await fs.writeFile(path.join(folders[folder], fileName), buffer, { flag: 'wx' });
-    return `${folder}/${fileName}`;
+    const fileName = `${crypto.randomUUID()}.${types[match[1]]}`;
+    const absolutePath = resolveGeneratedDocumentPath(folder, fileName);
+    await fs.writeFile(absolutePath, buffer, { flag: 'wx' });
+    return {
+        databasePath: `${folder}/${fileName}`,
+        absolutePath
+    };
+};
+
+const cleanupSavedDocuments = async (savedDocuments) => {
+    await Promise.all(savedDocuments.map(async ({ absolutePath }) => {
+        try {
+            await fs.unlink(absolutePath);
+        } catch (error) {
+            if (error.code !== 'ENOENT') {
+                console.error('Unable to remove an unreferenced client document:', error.message);
+            }
+        }
+    }));
 };
 
 export const updateClientDocuments = async (req, res) => {
@@ -28,18 +69,19 @@ export const updateClientDocuments = async (req, res) => {
     if (!EmployeeCode || !orderId || !Contributor || !LOA) {
         return res.status(400).json({ message: 'EmployeeCode, orderId, Contributor, and LOA are required.' });
     }
-    const savedPaths = [];
+    const savedDocuments = [];
     try {
-        const loaPath = await saveDocument(LOA, 'LOA');
-        const supportingPath = await saveDocument(SupportingDocs, 'SupportingDocs');
-        savedPaths.push(loaPath, supportingPath);
+        const loaDocument = await saveDocument(LOA, 'LOA');
+        if (loaDocument) savedDocuments.push(loaDocument);
+        const supportingDocument = await saveDocument(SupportingDocs, 'SupportingDocs');
+        if (supportingDocument) savedDocuments.push(supportingDocument);
         await poolConnect;
         const request = pool.request();
         request.input('EmployeeCode', sql.VarChar(50), EmployeeCode);
         request.input('OrderID', sql.VarChar(500), orderId);
         request.input('Contributor', sql.VarChar(500), Contributor);
-        request.input('LOA', sql.VarChar(sql.MAX), loaPath);
-        request.input('SupportingDocs', sql.VarChar(sql.MAX), supportingPath);
+        request.input('LOA', sql.VarChar(sql.MAX), loaDocument?.databasePath ?? null);
+        request.input('SupportingDocs', sql.VarChar(sql.MAX), supportingDocument?.databasePath ?? null);
         const result = await request.query(`
             UPDATE WorktrailclientData
             SET LOA = @LOA,
@@ -50,13 +92,14 @@ export const updateClientDocuments = async (req, res) => {
               AND OrderID = @OrderID
               AND Contributor = @Contributor
         `);
-        if (!result.rowsAffected[0]) return res.status(404).json({ message: 'Candidate record was not found.' });
+        if (!result.rowsAffected[0]) {
+            await cleanupSavedDocuments(savedDocuments);
+            return res.status(404).json({ message: 'Candidate record was not found.' });
+        }
         return res.status(200).json({ message: 'Documents uploaded successfully.', EmployeeCode, orderId });
     } catch (error) {
-        await Promise.all(savedPaths.filter(Boolean).map(async (filePath) => {
-            try { await fs.unlink(path.join(backendRoot, filePath)); } catch { /* best effort cleanup */ }
-        }));
+        await cleanupSavedDocuments(savedDocuments);
         console.error('Error updating client documents:', error);
-        return res.status(500).json({ message: error.message || 'Unable to upload documents.' });
+        return res.status(500).json({ message: 'Unable to upload documents.' });
     }
 };
